@@ -9,13 +9,13 @@ const CLIENT_SECRET = '';
  */
 function getSpotifyService() {
   return OAuth2.createService('Spotify')
-      .setAuthorizationBaseUrl('https://accounts.spotify.com/authorize')
-      .setTokenUrl('https://accounts.spotify.com/api/token')
-      .setClientId(CLIENT_ID)
-      .setClientSecret(CLIENT_SECRET)
-      .setCallbackFunction('authCallback')
-      .setPropertyStore(PropertiesService.getUserProperties())
-      .setScope('playlist-modify-public playlist-modify-private');
+    .setAuthorizationBaseUrl('https://accounts.spotify.com/authorize')
+    .setTokenUrl('https://accounts.spotify.com/api/token')
+    .setClientId(CLIENT_ID)
+    .setClientSecret(CLIENT_SECRET)
+    .setCallbackFunction('authCallback')
+    .setPropertyStore(PropertiesService.getUserProperties())
+    .setScope('playlist-modify-public playlist-modify-private');
 }
 
 /**
@@ -24,6 +24,7 @@ function getSpotifyService() {
 function authCallback(request) {
   var service = getSpotifyService();
   var authorized = service.handleCallback(request);
+
   if (authorized) {
     return HtmlService.createHtmlOutput('Success! You can close this tab.');
   } else {
@@ -32,124 +33,214 @@ function authCallback(request) {
 }
 
 /**
- * Logs the Link you need to paste into your Spotify Developer Dashboard.
+ * Logs the redirect URI you need in Spotify Developer Dashboard.
  */
 function logRedirectUri() {
   console.log(getSpotifyService().getRedirectUri());
 }
 
 /**
- * Check connection trigger.
+ * Verifies Spotify connection.
  */
 function checkSpotifyConnection() {
   var service = getSpotifyService();
+
   if (service.hasAccess()) {
     Logger.log("Connected! You are ready to build playlists.");
     SpreadsheetApp.getUi().alert("Connected! You are ready to build playlists.");
   } else {
     var authorizationUrl = service.getAuthorizationUrl();
     Logger.log("Open this URL to connect: " + authorizationUrl);
-    SpreadsheetApp.getUi().alert("Check execution logs (Ctrl+Enter) for your login URL.");
+    SpreadsheetApp.getUi().alert("Check execution logs for your Spotify login URL.");
   }
 }
 
 /**
- * Creates a custom UI menu when the sheet is opened.
+ * Adds menu to the Google Sheet.
  */
 function onOpen() {
-  var ui = SpreadsheetApp.getUi();
-  ui.createMenu('🎵 Spotify Engine')
-      .addItem('Verify Spotify Connection', 'checkSpotifyConnection')
-      .addSeparator()
-      .addItem('🚀 Create Brand New Playlist From THIS Tab', 'createDynamicPlaylistFromActiveTab')
-      .addToUi();
+  SpreadsheetApp.getUi()
+    .createMenu('🎵 Spotify Engine')
+    .addItem('Verify Spotify Connection', 'checkSpotifyConnection')
+    .addSeparator()
+    .addItem('🚀 Create Brand New Playlist From THIS Tab', 'createDynamicPlaylistFromActiveTab')
+    .addToUi();
 }
 
 /**
- * Reads the current open tab, gathers URIs from Column F, and provisions a brand-new playlist.
+ * Creates a brand-new Spotify playlist from the active sheet.
+ *
+ * Expected sheet layout:
+ * Column F = Spotify URI
+ * Cell I3 = Playlist name
  */
 function createDynamicPlaylistFromActiveTab() {
   const ss = SpreadsheetApp.getActiveSpreadsheet();
-  const activeSheet = ss.getActiveSheet(); 
+  const activeSheet = ss.getActiveSheet();
   const sheetName = activeSheet.getName();
 
-  // 1. Fetch Custom Playlist Title from cell I3
-  const playlistName = activeSheet.getRange("I3").getValue().toString().trim();
-  
+  // Playlist name from I3
+  const playlistName = String(activeSheet.getRange("I3").getValue()).trim();
+
   if (!playlistName) {
-    SpreadsheetApp.getUi().alert(
-      `❌ Error: Please type a playlist name in cell I3 before running.`
-    );
+    SpreadsheetApp.getUi().alert("❌ Error: Please type a playlist name in cell I3 before running.");
     return;
   }
 
-  // 2. Authenticate
+  // Authenticate
   const service = getSpotifyService();
+
   if (!service.hasAccess()) {
     SpreadsheetApp.getUi().alert("Spotify NOT connected. Go to 🎵 Spotify Engine > Verify Spotify Connection.");
     return;
   }
+
   const token = service.getAccessToken();
 
-  // 3. Find boundaries based on Column F (Spotify URIs)
+  // Read Spotify URIs from Column F
   const lastRow = activeSheet.getLastRow();
+
   if (lastRow < 2) {
     SpreadsheetApp.getUi().alert(`The "${sheetName}" tab has no song data found.`);
     return;
   }
 
-  // Grab all values from Column F starting at row 2 down to the last row
   const uriValues = activeSheet.getRange(2, 6, lastRow - 1, 1).getValues();
-  let trackUris = [];
 
-  // Filter out empty rows and make sure they look like valid Spotify URIs
-  uriValues.forEach((row) => {
+  const trackUris = [];
+
+  uriValues.forEach(function(row) {
     const uri = String(row[0]).trim();
-    if (uri && (uri.startsWith('spotify:track:') || uri.length > 15)) {
+
+    // Strict check: only real Spotify track URIs
+    if (uri.startsWith("spotify:track:")) {
       trackUris.push(uri);
     }
   });
 
   if (trackUris.length === 0) {
-    SpreadsheetApp.getUi().alert("❌ Aborted: No valid Spotify URIs found in Column F.");
+    SpreadsheetApp.getUi().alert("❌ Aborted: No valid Spotify track URIs found in Column F.");
     return;
   }
 
-  // 4. POST to Spotify to create a fresh playlist asset
+  // Create new playlist
+  const playlistRes = UrlFetchApp.fetch("https://api.spotify.com/v1/me/playlists", {
+    method: "post",
+    contentType: "application/json",
+    headers: {
+      Authorization: "Bearer " + token
+    },
+    muteHttpExceptions: true,
+    payload: JSON.stringify({
+      name: playlistName,
+      public: true,
+      description: "Generated on-demand from Google Sheet tab: " + sheetName
+    })
+  });
+
+  const playlistCode = playlistRes.getResponseCode();
+  const playlistBody = playlistRes.getContentText();
+
+  Logger.log("Create playlist response code: " + playlistCode);
+  Logger.log("Create playlist response body: " + playlistBody);
+
+  if (playlistCode < 200 || playlistCode >= 300) {
+    SpreadsheetApp.getUi().alert("❌ Error creating playlist:\n\nHTTP " + playlistCode + "\n\n" + playlistBody);
+    return;
+  }
+
+  const playlistData = JSON.parse(playlistBody);
+  const newPlaylistId = playlistData.id;
+  const playlistUrl = playlistData.external_urls.spotify;
+
+  // Add tracks to playlist
+  const addTracksRes = UrlFetchApp.fetch("https://api.spotify.com/v1/playlists/" + newPlaylistId + "/items", {
+    method: "post",
+    contentType: "application/json",
+    headers: {
+      Authorization: "Bearer " + token
+    },
+    muteHttpExceptions: true,
+    payload: JSON.stringify({
+      uris: trackUris
+    })
+  });
+
+  const addCode = addTracksRes.getResponseCode();
+  const addBody = addTracksRes.getContentText();
+
+  Logger.log("Add tracks response code: " + addCode);
+  Logger.log("Add tracks response body: " + addBody);
+
+  if (addCode < 200 || addCode >= 300) {
+    SpreadsheetApp.getUi().alert(
+      "⚠️ Playlist was created, but pushing tracks failed.\n\n" +
+      "HTTP " + addCode + "\n\n" +
+      addBody
+    );
+    return;
+  }
+
+  SpreadsheetApp.getUi().alert(
+    "🎉 Success!\n\n" +
+    "Created new playlist: " + playlistName + "\n" +
+    "Added " + trackUris.length + " tracks from Column F.\n\n" +
+    playlistUrl
+  );
+}
+function resetSpotifyConnection() {
+  getSpotifyService().reset();
+  Logger.log("Spotify connection reset. Now run Verify Spotify Connection again.");
+}
+function debugSpotifyUris() {
+  const sheet = SpreadsheetApp.getActiveSpreadsheet().getActiveSheet();
+  const lastRow = sheet.getLastRow();
+
+  const values = sheet.getRange(2, 6, lastRow - 1, 1).getValues();
+
+  values.forEach((row, index) => {
+    Logger.log("ROW " + (index + 2) + ": " + row[0]);
+  });
+}
+function spotifyOneTrackTest() {
+  const service = getSpotifyService();
+  if (!service.hasAccess()) {
+    Logger.log("No Spotify access.");
+    return;
+  }
+
+  const token = service.getAccessToken();
+
   const playlistRes = UrlFetchApp.fetch("https://api.spotify.com/v1/me/playlists", {
     method: "post",
     contentType: "application/json",
     headers: { Authorization: "Bearer " + token },
     muteHttpExceptions: true,
     payload: JSON.stringify({
-      name: playlistName,
-      public: true,
-      description: `Generated on-demand from Google Sheet tab: ${sheetName}`
+      name: "Spotify API One Track Test",
+      public: false,
+      description: "Tiny test from Apps Script"
     })
   });
 
-  if (playlistRes.getResponseCode() < 200 || playlistRes.getResponseCode() >= 300) {
-    SpreadsheetApp.getUi().alert("Error creating playlist: " + playlistRes.getContentText());
-    return;
-  }
+  Logger.log("CREATE CODE: " + playlistRes.getResponseCode());
+  Logger.log("CREATE BODY: " + playlistRes.getContentText());
 
-  const playlistData = JSON.parse(playlistRes.getContentText());
-  const newPlaylistId = playlistData.id;
+  const playlist = JSON.parse(playlistRes.getContentText());
 
-  // 5. Push URIs directly from Column F to the new playlist
-  const addTracksRes = UrlFetchApp.fetch(`https://api.spotify.com/v1/playlists/${newPlaylistId}/tracks`, {
-    method: "post",
-    contentType: "application/json",
-    headers: { Authorization: "Bearer " + token },
-    muteHttpExceptions: true,
-    payload: JSON.stringify({ uris: trackUris })
-  });
+  const addRes = UrlFetchApp.fetch(
+    "https://api.spotify.com/v1/playlists/" + playlist.id + "/items",
+    {
+      method: "post",
+      contentType: "application/json",
+      headers: { Authorization: "Bearer " + token },
+      muteHttpExceptions: true,
+      payload: JSON.stringify({
+        uris: ["spotify:track:4IvjI6AAa12yrtFlJqp59r"]
+      })
+    }
+  );
 
-  if (addTracksRes.getResponseCode() >= 200 && addTracksRes.getResponseCode() < 300) {
-    SpreadsheetApp.getUi().alert(
-      `🎉 Success!\n\nCreated new playlist: "${playlistName}"\nAdded ${trackUris.length} tracks directly from Column F!`
-    );
-  } else {
-    SpreadsheetApp.getUi().alert("Playlist created, but pushing tracks failed. Check logs.");
-  }
+  Logger.log("ADD CODE: " + addRes.getResponseCode());
+  Logger.log("ADD BODY: " + addRes.getContentText());
 }
